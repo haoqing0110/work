@@ -37,8 +37,11 @@ var (
 		"spoke/clusterrole.yaml",
 		"spoke/component_namespace.yaml",
 		"spoke/service_account.yaml",
-		"spoke/clusterrole_binding.yaml",
+		//"spoke/clusterrole_binding.yaml",
 		"spoke/clusterrole_binding_addition.yaml",
+		"spoke/role.yaml",
+		"spoke/role_binding.yaml",
+		"spoke/role_binding_extension-apiserver.yaml",
 	}
 	deploymentFile            = "spoke/deployment.yaml"
 	hubKubeconfigSecret       = "hub-kubeconfig-secret"
