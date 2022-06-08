@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	goerrors "errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	workapiv1 "open-cluster-management.io/api/work/v1"
 	"open-cluster-management.io/work/test/integration/util"
@@ -175,6 +177,9 @@ var _ = ginkgo.Describe("Work agent", func() {
 			_, err = spokeKubeClient.CoreV1().Namespaces().Create(context.Background(), ns, metav1.CreateOptions{})
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
+			//TODO create role,rolebinding
+			newSpokeClusterRoleAndBinding(nameSuffix)
+			newSpokeRoleAndBinding(ns2, nameSuffix)
 			cmFinalizers := []string{"cluster.open-cluster-management.io/testing"}
 			objects := []runtime.Object{
 				newConfigmap(ns1, "cm1", nil, nil),
@@ -185,6 +190,8 @@ var _ = ginkgo.Describe("Work agent", func() {
 			work := newManifestWork(clusterName, fmt.Sprintf("w1-%s", nameSuffix), objects...)
 			work, err = hubWorkClient.WorkV1().ManifestWorks(clusterName).Create(context.Background(), work, metav1.CreateOptions{})
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			newSpokeRoleAndBinding(ns1, nameSuffix)
+			//TODO restart work agent pods
 
 			// check if resources are applied for manifests
 			gomega.Eventually(func() bool {
@@ -469,6 +476,7 @@ var _ = ginkgo.Describe("Work agent", func() {
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 			objects := []runtime.Object{crd, clusterRole, cr}
+			newSpokeClusterRoleAndBinding(nameSuffix)
 			work := newManifestWork(clusterName, workName, objects...)
 			work, err = hubWorkClient.WorkV1().ManifestWorks(clusterName).Create(context.Background(), work, metav1.CreateOptions{})
 			gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -643,6 +651,208 @@ var _ = ginkgo.Describe("Work agent", func() {
 		})
 	})
 })
+
+func newSpokeClusterRoleAndBinding(suffix string) error {
+	var (
+		cr         *unstructured.Unstructured
+		crResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "clusterroles",
+		}
+	)
+	cr, err := spokeCR(suffix)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	err = wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = spokeDynamicClient.Resource(crResource).Create(context.TODO(), cr, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	var (
+		crb         *unstructured.Unstructured
+		crbResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "clusterrolebindings",
+		}
+	)
+	crb, err = spokeCRB(suffix)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	err = wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = spokeDynamicClient.Resource(crbResource).Create(context.TODO(), crb, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	return nil
+}
+
+func newSpokeRoleAndBinding(nsName, suffix string) error {
+	var (
+		role         *unstructured.Unstructured
+		roleResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "roles",
+		}
+	)
+
+	role, err := spokeRole(nsName, suffix)
+	if err != nil {
+		return err
+	}
+	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = spokeDynamicClient.Resource(roleResource).Namespace(nsName).Create(context.TODO(), role, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		return err
+	}
+
+	var (
+		roleBinding         *unstructured.Unstructured
+		roleBindingResource = schema.GroupVersionResource{
+			Group:    "rbac.authorization.k8s.io",
+			Version:  "v1",
+			Resource: "rolebindings",
+		}
+	)
+
+	roleBinding, err = spokeRoleBinding(nsName, suffix)
+	if err != nil {
+		return err
+	}
+	if err := wait.Poll(1*time.Second, 5*time.Second, func() (bool, error) {
+		var err error
+		_, err = spokeDynamicClient.Resource(roleBindingResource).Namespace(nsName).Create(context.TODO(), roleBinding, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func spokeCR(suffix string) (*unstructured.Unstructured, error) {
+	cr, err := assetToUnstructured("spoke/clusterrole_ex.yaml")
+	if err != nil {
+		return nil, err
+	}
+	name := cr.GetName()
+	name = fmt.Sprintf("%v-%v", name, suffix)
+	cr.SetName(name)
+	return cr, nil
+}
+
+func spokeCRB(suffix string) (*unstructured.Unstructured, error) {
+	crb, err := assetToUnstructured("spoke/clusterrole_binding_ex.yaml")
+	if err != nil {
+		return nil, err
+	}
+
+	name := crb.GetName()
+	name = fmt.Sprintf("%v-%v", name, suffix)
+	crb.SetName(name)
+
+	roleRef, found, err := unstructured.NestedMap(crb.Object, "roleRef")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, goerrors.New("couldn't find CRB roleRef")
+	}
+	roleRef["name"] = name
+	err = unstructured.SetNestedMap(crb.Object, roleRef, "roleRef")
+	if err != nil {
+		return nil, err
+	}
+
+	/*subjects, found, err := unstructured.NestedSlice(crb.Object, "subjects")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, goerrors.New("couldn't find CRB subjects")
+	}
+
+	err = unstructured.SetNestedField(subjects[0].(map[string]interface{}), nsName, "namespace")
+	if err != nil {
+		return nil, err
+	}
+
+	err = unstructured.SetNestedField(crb.Object, subjects, "subjects")
+	if err != nil {
+		return nil, err
+	}*/
+
+	return crb, nil
+}
+
+func spokeRole(nsName, suffix string) (*unstructured.Unstructured, error) {
+	r, err := assetToUnstructured("spoke/role_ex.yaml")
+	if err != nil {
+		return nil, err
+	}
+	name := r.GetName()
+	name = fmt.Sprintf("%v-%v", name, suffix)
+	r.SetName(name)
+	r.SetNamespace(nsName)
+	return r, nil
+}
+
+func spokeRoleBinding(nsName, suffix string) (*unstructured.Unstructured, error) {
+	rb, err := assetToUnstructured("spoke/role_binding_ex.yaml")
+	if err != nil {
+		return nil, err
+	}
+	name := rb.GetName()
+	name = fmt.Sprintf("%v-%v", name, suffix)
+	rb.SetName(name)
+	rb.SetNamespace(nsName)
+	roleRef, found, err := unstructured.NestedMap(rb.Object, "roleRef")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, goerrors.New("couldn't find RB roleRef")
+	}
+	roleRef["name"] = name
+	err = unstructured.SetNestedMap(rb.Object, roleRef, "roleRef")
+	if err != nil {
+		return nil, err
+	}
+	/*subjects, found, err := unstructured.NestedSlice(rb.Object, "subjects")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, goerrors.New("couldn't find RB subjects")
+	}
+	err = unstructured.SetNestedField(subjects[0].(map[string]interface{}), nsName, "namespace")
+	if err != nil {
+		return nil, err
+	}
+	err = unstructured.SetNestedField(rb.Object, subjects, "subjects")
+	if err != nil {
+		return nil, err
+	}*/
+	return rb, nil
+}
 
 func newManifestWork(namespace, name string, objects ...runtime.Object) *workapiv1.ManifestWork {
 	work := &workapiv1.ManifestWork{}
